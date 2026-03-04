@@ -1,0 +1,16 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend/dist:/app/static
+    environment:
+      - DEBUG=true
+
+  celery:
+    volumes:
+      - ./backend:/app/backend
+    environment:
+      - DEBUG=true
