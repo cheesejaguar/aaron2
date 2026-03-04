@@ -1,0 +1,26 @@
+{
+  "name": "aaron2",
+  "version": "1.0.0",
+  "description": "> AI-powered grocery tracking, meal planning, and health metrics — built to help you **lose weight, lower cholesterol, and lower blood pressure**. 💪🫀",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cheesejaguar/aaron2.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/cheesejaguar/aaron2/issues"
+  },
+  "homepage": "https://github.com/cheesejaguar/aaron2#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "playwright": "^1.58.2",
+    "tsx": "^4.21.0"
+  }
+}

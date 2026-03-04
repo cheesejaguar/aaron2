@@ -9,6 +9,10 @@
 
 ---
 
+![Dashboard Screenshot](docs/screenshots/dashboard.png)
+
+---
+
 ## ✨ Features
 
 - 🧾 **Receipt Parsing** — Paste a grocery receipt and AI extracts items into your pantry
