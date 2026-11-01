@@ -32,9 +32,7 @@ async def _calculate_consumption_rate(db, user_id, pantry_item) -> dict:
 
 async def _auto_replenish():
     async with async_session_factory() as db:
-        result = await db.execute(
-            select(User).where(User.email == DEFAULT_USER_EMAIL)
-        )
+        result = await db.execute(select(User).where(User.email == DEFAULT_USER_EMAIL))
         user = result.scalar_one_or_none()
         if not user:
             return

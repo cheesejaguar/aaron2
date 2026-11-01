@@ -1,13 +1,14 @@
-from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+import respx
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.models.pantry import PantryItem
 from app.models.recipe import Recipe
-from app.models.shopping import ShoppingList
+from app.models.shopping import ShoppingList, ShoppingListItem
 from app.models.user import User
 
 
@@ -27,6 +28,22 @@ async def recipe(db_session: AsyncSession, test_user: User) -> Recipe:
     await db_session.flush()
     await db_session.refresh(r)
     return r
+
+
+async def _list_items(db_session: AsyncSession, user: User) -> dict[str, list[ShoppingListItem]]:
+    """Map each of the user's shopping list names to its items."""
+    lists = (
+        (await db_session.execute(select(ShoppingList).where(ShoppingList.user_id == user.id)))
+        .scalars()
+        .all()
+    )
+    out = {}
+    for sl in lists:
+        items = await db_session.execute(
+            select(ShoppingListItem).where(ShoppingListItem.shopping_list_id == sl.id)
+        )
+        out[sl.name] = list(items.scalars().all())
+    return out
 
 
 class TestListRecipes:
@@ -126,47 +143,68 @@ class TestGetRecipe:
 
 class TestGenerateRecipe:
     @pytest.mark.asyncio
-    async def test_generate_recipe(self, client: AsyncClient, test_user: User):
-        mock_recipe = Recipe(
-            id=uuid4(),
-            user_id=test_user.id,
-            title="AI Healthy Bowl",
-            is_ai_generated=True,
+    async def test_generate_recipe(self, client: AsyncClient, test_user: User, openrouter):
+        openrouter.reply(
+            {
+                "title": "AI Healthy Bowl",
+                "description": "Grain bowl",
+                "ingredients": [{"name": "quinoa", "quantity": 1, "unit": "cup"}],
+                "steps": ["Cook quinoa"],
+                "nutrition_per_serving": {"calories": 420, "sodium_mg": 180},
+                "health_tags": ["dash-diet"],
+            }
         )
-        with patch(
-            "app.api.v1.recipes.generate_recipe",
-            new_callable=AsyncMock,
-            return_value=mock_recipe,
-        ):
-            resp = await client.post(
-                "/api/v1/recipes/generate",
-                json={"health_focus": "heart-healthy", "cuisine": "Mediterranean"},
-            )
-            assert resp.status_code == 201
-            assert resp.json()["is_ai_generated"] is True
+
+        resp = await client.post(
+            "/api/v1/recipes/generate",
+            json={"health_focus": "heart-healthy", "cuisine": "Mediterranean"},
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["is_ai_generated"] is True
+        assert data["title"] == "AI Healthy Bowl"
+        assert data["ingredients_json"] == [{"name": "quinoa", "quantity": 1, "unit": "cup"}]
+        assert data["steps_json"] == ["Cook quinoa"]
+        assert data["health_tags"] == ["dash-diet"]
+        assert openrouter.last_messages[1]["content"] == (
+            "Generate a healthy recipe. Health focus: heart-healthy. Cuisine: Mediterranean"
+        )
+
+        listed = await client.get(f"/api/v1/recipes/{data['id']}")
+        assert listed.json()["title"] == "AI Healthy Bowl"
 
 
 class TestImportRecipe:
     @pytest.mark.asyncio
-    async def test_import_url(self, client: AsyncClient, test_user: User):
-        mock_recipe = Recipe(
-            id=uuid4(),
-            user_id=test_user.id,
-            title="Imported Recipe",
-            source_url="https://example.com/recipe",
-            is_ai_generated=False,
+    async def test_import_url(self, client: AsyncClient, test_user: User, openrouter):
+        openrouter.reply(
+            {
+                "title": "Imported Recipe",
+                "ingredients": [{"name": "lentils"}],
+                "steps": ["Simmer"],
+            }
         )
-        with patch(
-            "app.api.v1.recipes.import_recipe_from_url",
-            new_callable=AsyncMock,
-            return_value=mock_recipe,
-        ):
+        with respx.mock(assert_all_called=True) as web:
+            web.get("https://example.com/recipe").respond(
+                200, text="<h1>Lentil Soup</h1><p>Simmer lentils.</p>"
+            )
+
             resp = await client.post(
                 "/api/v1/recipes/import-url",
                 json={"url": "https://example.com/recipe"},
             )
-            assert resp.status_code == 201
-            assert resp.json()["source_url"] == "https://example.com/recipe"
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["source_url"] == "https://example.com/recipe"
+        assert data["title"] == "Imported Recipe"
+        assert data["is_ai_generated"] is False
+        assert data["ingredients_json"] == [{"name": "lentils"}]
+        # The fetched page is what gets sent to the model
+        prompt = openrouter.last_messages[1]["content"]
+        assert prompt.startswith("URL: https://example.com/recipe")
+        assert "<h1>Lentil Soup</h1>" in prompt
 
 
 class TestAddToShoppingList:
@@ -193,7 +231,14 @@ class TestAddToShoppingList:
 
         resp = await client.post(f"/api/v1/recipes/{recipe.id}/add-to-shopping-list")
         assert resp.status_code == 200
-        assert "2 ingredients" in resp.json()["message"]
+        assert resp.json()["message"] == "Added 2 ingredients to shopping list"
+
+        lists = await _list_items(db_session, test_user)
+        items = lists["Recipe Ingredients"]
+        assert sorted((i.name, i.quantity, i.unit) for i in items) == [
+            ("Broccoli", 1, "head"),
+            ("Rice", 2, "cups"),
+        ]
 
     @pytest.mark.asyncio
     async def test_all_ingredients_in_pantry(
@@ -206,14 +251,16 @@ class TestAddToShoppingList:
             ingredients_json=[{"name": "Eggs"}],
             is_ai_generated=False,
         )
-        pantry = PantryItem(id=uuid4(), user_id=test_user.id, name="Eggs", quantity=12.0)
+        # Matching is case-insensitive
+        pantry = PantryItem(id=uuid4(), user_id=test_user.id, name="eggs", quantity=12.0)
         db_session.add(recipe)
         db_session.add(pantry)
         await db_session.flush()
 
         resp = await client.post(f"/api/v1/recipes/{recipe.id}/add-to-shopping-list")
         assert resp.status_code == 200
-        assert "already in pantry" in resp.json()["message"]
+        assert resp.json()["message"] == "All ingredients already in pantry"
+        assert await _list_items(db_session, test_user) == {}
 
     @pytest.mark.asyncio
     async def test_creates_shopping_list_if_none(
@@ -231,7 +278,12 @@ class TestAddToShoppingList:
 
         resp = await client.post(f"/api/v1/recipes/{recipe.id}/add-to-shopping-list")
         assert resp.status_code == 200
-        assert "1 ingredients" in resp.json()["message"]
+        assert resp.json()["message"] == "Added 1 ingredients to shopping list"
+
+        lists = await _list_items(db_session, test_user)
+        assert list(lists) == ["Recipe Ingredients"]
+        (item,) = lists["Recipe Ingredients"]
+        assert (item.name, item.quantity, item.is_ai_suggested) == ("Tofu", 1, True)
 
     @pytest.mark.asyncio
     async def test_uses_existing_active_list(
@@ -253,6 +305,10 @@ class TestAddToShoppingList:
 
         resp = await client.post(f"/api/v1/recipes/{recipe.id}/add-to-shopping-list")
         assert resp.status_code == 200
+
+        lists = await _list_items(db_session, test_user)
+        assert list(lists) == ["My List"]  # no new list created
+        assert [i.name for i in lists["My List"]] == ["Avocado"]
 
     @pytest.mark.asyncio
     async def test_recipe_not_found(self, client: AsyncClient):

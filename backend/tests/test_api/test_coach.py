@@ -1,48 +1,53 @@
-from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 from httpx import AsyncClient
 
-from app.schemas.ai import ChatResponse, InsightsResponse
+from app.models.ai import AIConversation
 
 
 class TestCoachChat:
     @pytest.mark.asyncio
-    async def test_chat(self, client: AsyncClient):
-        mock_response = ChatResponse(
-            reply="Based on your blood pressure readings, I recommend reducing sodium intake.",
-            conversation_id=str(uuid4()),
+    async def test_chat(self, client: AsyncClient, db_session, test_user, openrouter):
+        openrouter.reply(
+            "Based on your blood pressure readings, I recommend reducing sodium intake."
         )
-        with patch(
-            "app.api.v1.coach.chat",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ):
-            resp = await client.post(
-                "/api/v1/coach/chat",
-                json={"message": "How can I lower my blood pressure?"},
-            )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert "sodium" in data["reply"]
-            assert "conversation_id" in data
+
+        resp = await client.post(
+            "/api/v1/coach/chat",
+            json={"message": "How can I lower my blood pressure?"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reply"] == (
+            "Based on your blood pressure readings, I recommend reducing sodium intake."
+        )
+        assert openrouter.last_messages[-1] == {
+            "role": "user",
+            "content": "How can I lower my blood pressure?",
+        }
+        conv = await db_session.get(AIConversation, UUID(data["conversation_id"]))
+        assert conv.user_id == test_user.id
 
     @pytest.mark.asyncio
-    async def test_chat_with_conversation_id(self, client: AsyncClient):
-        conv_id = str(uuid4())
-        mock_response = ChatResponse(reply="Great progress!", conversation_id=conv_id)
-        with patch(
-            "app.api.v1.coach.chat",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ):
-            resp = await client.post(
-                "/api/v1/coach/chat",
-                json={"message": "Thanks!", "conversation_id": conv_id},
-            )
-            assert resp.status_code == 200
-            assert resp.json()["conversation_id"] == conv_id
+    async def test_chat_with_conversation_id(self, client: AsyncClient, openrouter):
+        openrouter.reply("Hello!").reply("Great progress!")
+        first = await client.post("/api/v1/coach/chat", json={"message": "Hi"})
+        conv_id = first.json()["conversation_id"]
+
+        resp = await client.post(
+            "/api/v1/coach/chat",
+            json={"message": "Thanks!", "conversation_id": conv_id},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json() == {"reply": "Great progress!", "conversation_id": conv_id}
+        assert [m["content"] for m in openrouter.last_messages[1:]] == [
+            "Hi",
+            "Hello!",
+            "Thanks!",
+        ]
 
     @pytest.mark.asyncio
     async def test_chat_missing_message(self, client: AsyncClient):
@@ -50,23 +55,16 @@ class TestCoachChat:
         assert resp.status_code == 422
 
 
-
 class TestInsights:
     @pytest.mark.asyncio
-    async def test_get_insights(self, client: AsyncClient):
-        mock_response = InsightsResponse(
-            insights=[
-                {"type": "bp", "message": "Your BP has been trending down"},
-                {"type": "nutrition", "message": "Increase potassium intake"},
-            ]
-        )
-        with patch(
-            "app.api.v1.coach.generate_insights",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ):
-            resp = await client.get("/api/v1/coach/insights")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert len(data["insights"]) == 2
+    async def test_get_insights(self, client: AsyncClient, openrouter):
+        insights = [
+            {"type": "bp", "message": "Your BP has been trending down"},
+            {"type": "nutrition", "message": "Increase potassium intake"},
+        ]
+        openrouter.reply({"insights": insights})
 
+        resp = await client.get("/api/v1/coach/insights")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"insights": insights}

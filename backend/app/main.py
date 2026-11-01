@@ -27,9 +27,7 @@ async def _ensure_default_user():
     for attempt in range(10):
         try:
             async with async_session_factory() as session:
-                result = await session.execute(
-                    select(User).where(User.email == DEFAULT_USER_EMAIL)
-                )
+                result = await session.execute(select(User).where(User.email == DEFAULT_USER_EMAIL))
                 if not result.scalar_one_or_none():
                     user = User(
                         email=DEFAULT_USER_EMAIL,

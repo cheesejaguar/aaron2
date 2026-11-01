@@ -1,5 +1,4 @@
 from datetime import date
-from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -7,6 +6,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.meal_plan import MealPlan, MealPlanEntry
+from app.models.pantry import PantryItem
 from app.models.user import User
 
 
@@ -106,25 +106,47 @@ class TestCreateMealPlan:
 
 class TestSuggestMealPlan:
     @pytest.mark.asyncio
-    async def test_suggest(self, client: AsyncClient, test_user: User):
-        mock_plan = MealPlan(
-            id=uuid4(),
-            user_id=test_user.id,
-            week_start_date=date(2025, 6, 16),
+    async def test_suggest(
+        self, client: AsyncClient, db_session: AsyncSession, test_user: User, openrouter
+    ):
+        db_session.add(PantryItem(user_id=test_user.id, name="Oats", quantity=1.0))
+        await db_session.flush()
+        oatmeal = {"name": "Oatmeal", "estimated_calories": 300, "estimated_sodium_mg": 5}
+        salad = {"name": "Salad", "estimated_calories": 400, "estimated_sodium_mg": 300}
+        openrouter.reply(
+            {
+                "entries": [
+                    {"day_of_week": 0, "meal_type": "breakfast", "meal": oatmeal},
+                    {"day_of_week": 2, "meal_type": "lunch", "meal": salad},
+                ]
+            }
         )
-        # Need to initialize entries list for the response model
-        mock_plan.entries = []
 
-        with patch(
-            "app.api.v1.meal_plans.suggest_meal_plan",
-            new_callable=AsyncMock,
-            return_value=mock_plan,
-        ):
-            resp = await client.post(
-                "/api/v1/meal-plans/suggest",
-                json={
-                    "week_start_date": "2025-06-16",
-                    "health_focus": "heart-healthy",
-                },
-            )
-            assert resp.status_code == 201
+        resp = await client.post(
+            "/api/v1/meal-plans/suggest",
+            json={"week_start_date": "2025-06-16", "health_focus": "heart-healthy"},
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["week_start_date"] == "2025-06-16"
+        entries = sorted(data["entries"], key=lambda e: e["day_of_week"])
+        assert [(e["day_of_week"], e["meal_type"], e["custom_meal_json"]) for e in entries] == [
+            (0, "breakfast", oatmeal),
+            (2, "lunch", salad),
+        ]
+        prompt = openrouter.last_messages[1]["content"]
+        assert "Available pantry items: Oats" in prompt
+        assert "Health focus: heart-healthy" in prompt
+
+    @pytest.mark.asyncio
+    async def test_suggest_ai_unavailable_creates_empty_plan(self, client: AsyncClient, openrouter):
+        openrouter.fail(500, times=3)
+
+        resp = await client.post(
+            "/api/v1/meal-plans/suggest",
+            json={"week_start_date": "2025-06-16"},
+        )
+
+        assert resp.status_code == 201
+        assert resp.json()["entries"] == []
