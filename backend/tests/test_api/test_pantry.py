@@ -55,7 +55,6 @@ class TestListPantry:
         assert len(resp.json()) == 0
 
 
-
 class TestCreatePantryItem:
     @pytest.mark.asyncio
     async def test_create_minimal(self, client: AsyncClient):
@@ -159,6 +158,9 @@ class TestConsumePantryItem:
         assert resp.status_code == 200
         assert resp.json()["quantity"] == 1.0
 
+        listed = await client.get("/api/v1/pantry/")
+        assert listed.json()[0]["quantity"] == 1.0
+
     @pytest.mark.asyncio
     async def test_consume_to_zero(self, client: AsyncClient, pantry_item: PantryItem):
         resp = await client.post(
@@ -196,8 +198,12 @@ class TestConsumePantryItem:
         assert log.meal_type == "breakfast"
         assert log.quantity == 2.0
         assert log.unit == "pieces"
-        assert log.calories is not None
-        assert log.calories > 0
+        # nutrition_json is scaled by the consumed share of the stock (2 of 5)
+        assert log.calories == pytest.approx(105 * 0.4)
+        assert log.protein_g == pytest.approx(1.3 * 0.4)
+        assert log.carbs_g == pytest.approx(27 * 0.4)
+        assert log.fat_g == pytest.approx(0.4 * 0.4)
+        assert log.fiber_g == 0
 
     @pytest.mark.asyncio
     async def test_consume_default_meal_type(

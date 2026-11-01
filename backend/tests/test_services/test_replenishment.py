@@ -1,59 +1,56 @@
-from unittest.mock import MagicMock
-from uuid import uuid4
+from datetime import datetime, timedelta
 
-import pytest
-
+from app.models.food_log import FoodLog
+from app.models.pantry import PantryItem
 from app.tasks.replenishment import _calculate_consumption_rate
 
 
+async def _add_logs(db_session, user_id, food_name, count, days_ago=1):
+    when = datetime.utcnow() - timedelta(days=days_ago)
+    db_session.add_all(
+        [
+            FoodLog(user_id=user_id, meal_type="snack", food_name=food_name, logged_at=when)
+            for _ in range(count)
+        ]
+    )
+    await db_session.flush()
+
+
 class TestCalculateConsumptionRate:
-    @pytest.mark.asyncio
-    async def test_no_consumption(self):
-        from unittest.mock import AsyncMock
-
-        mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar.return_value = 0
-        mock_db.execute.return_value = mock_result
-
-        pantry_item = MagicMock()
-        pantry_item.name = "Milk"
-        pantry_item.quantity = 5.0
-
-        rate = await _calculate_consumption_rate(mock_db, uuid4(), pantry_item)
+    async def test_no_consumption(self, db_session, test_user):
+        item = PantryItem(user_id=test_user.id, name="Milk", quantity=5.0)
+        rate = await _calculate_consumption_rate(db_session, test_user.id, item)
         assert rate["daily_rate"] == 0.0
         assert rate["days_until_depletion"] == float("inf")
 
-    @pytest.mark.asyncio
-    async def test_with_consumption(self):
-        from unittest.mock import AsyncMock
+    async def test_with_consumption(self, db_session, test_user):
+        await _add_logs(db_session, test_user.id, "Eggs", 14)  # 14 logs in 14 days = 1/day
+        item = PantryItem(user_id=test_user.id, name="Eggs", quantity=5.0)
 
-        mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar.return_value = 14  # 14 logs in 14 days = 1/day
-        mock_db.execute.return_value = mock_result
+        rate = await _calculate_consumption_rate(db_session, test_user.id, item)
 
-        pantry_item = MagicMock()
-        pantry_item.name = "Eggs"
-        pantry_item.quantity = 5.0
-
-        rate = await _calculate_consumption_rate(mock_db, uuid4(), pantry_item)
         assert rate["daily_rate"] == 1.0
         assert rate["days_until_depletion"] == 5.0
 
-    @pytest.mark.asyncio
-    async def test_high_consumption_rate(self):
-        from unittest.mock import AsyncMock
+    async def test_high_consumption_rate(self, db_session, test_user):
+        await _add_logs(db_session, test_user.id, "Water", 28)  # 2/day
+        item = PantryItem(user_id=test_user.id, name="Water", quantity=4.0)
 
-        mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar.return_value = 28  # 28 logs in 14 days = 2/day
-        mock_db.execute.return_value = mock_result
+        rate = await _calculate_consumption_rate(db_session, test_user.id, item)
 
-        pantry_item = MagicMock()
-        pantry_item.name = "Water"
-        pantry_item.quantity = 4.0
-
-        rate = await _calculate_consumption_rate(mock_db, uuid4(), pantry_item)
         assert rate["daily_rate"] == 2.0
         assert rate["days_until_depletion"] == 2.0
+
+    async def test_only_counts_matching_recent_logs_for_user(
+        self, db_session, test_user, second_user
+    ):
+        await _add_logs(db_session, test_user.id, "Eggs", 7)
+        await _add_logs(db_session, test_user.id, "Eggs", 5, days_ago=20)  # outside window
+        await _add_logs(db_session, test_user.id, "Bacon", 5)  # different food
+        await _add_logs(db_session, second_user.id, "Eggs", 5)  # different user
+        item = PantryItem(user_id=test_user.id, name="Eggs", quantity=3.0)
+
+        rate = await _calculate_consumption_rate(db_session, test_user.id, item)
+
+        assert rate["daily_rate"] == 0.5
+        assert rate["days_until_depletion"] == 6.0

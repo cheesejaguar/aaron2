@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 from enum import StrEnum
+from uuid import UUID
 
 from openai import AsyncOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,8 +70,11 @@ TASK_MODEL_MAP: dict[TaskType, AIModel] = {
 
 class AIService:
     def __init__(self):
+        # openai>=2 raises at construction time when api_key is empty, which would
+        # crash app import whenever OPENROUTER_API_KEY is unset. Use a placeholder so
+        # the app still starts; requests then fail and fall back to FALLBACK_MESSAGES.
         self.client = AsyncOpenAI(
-            api_key=settings.openrouter_api_key,
+            api_key=settings.openrouter_api_key or "openrouter-api-key-not-set",
             base_url="https://openrouter.ai/api/v1",
             default_headers={
                 "X-Title": "Aaron 2.0",
@@ -124,7 +128,7 @@ class AIService:
         task_type: str,
     ) -> None:
         log = AIUsageLog(
-            user_id=user_id,
+            user_id=UUID(user_id),
             model=model,
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),
@@ -151,7 +155,8 @@ class AIService:
             cache_key = self._cache_key(task_type.value, messages)
             cached = await redis.get(cache_key)
             if cached:
-                return cached
+                # The client uses decode_responses=True, so this is already str.
+                return cached if isinstance(cached, str) else cached.decode()
 
         # Call AI with fallback
         try:

@@ -43,13 +43,14 @@ class TestBloodPressure:
     async def test_list_bp_logs_ordered(
         self, client: AsyncClient, db_session: AsyncSession, test_user: User
     ):
-        for sys_val in [120, 130, 140]:
+        # Inserted out of chronological order
+        for sys_val, day in [(130, 2), (120, 1), (140, 3)]:
             log = BloodPressureLog(
                 id=uuid4(),
                 user_id=test_user.id,
                 systolic=sys_val,
                 diastolic=80,
-                measured_at=datetime.utcnow(),
+                measured_at=datetime(2025, 6, day, 8, 0),
             )
             db_session.add(log)
         await db_session.flush()
@@ -57,9 +58,8 @@ class TestBloodPressure:
         resp = await client.get("/api/v1/health/blood-pressure")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 3
         # Most recent first
-        assert data[0]["systolic"] >= data[-1]["systolic"]
+        assert [d["systolic"] for d in data] == [140, 130, 120]
 
     @pytest.mark.asyncio
     async def test_list_bp_with_limit(
@@ -72,14 +72,15 @@ class TestBloodPressure:
                     user_id=test_user.id,
                     systolic=120 + i,
                     diastolic=80,
-                    measured_at=datetime.utcnow(),
+                    measured_at=datetime(2025, 6, 1 + i, 8, 0),
                 )
             )
         await db_session.flush()
 
         resp = await client.get("/api/v1/health/blood-pressure", params={"limit": 2})
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        # The two most recent readings
+        assert [d["systolic"] for d in resp.json()] == [124, 123]
 
     @pytest.mark.asyncio
     async def test_bp_user_isolation(
@@ -128,7 +129,7 @@ class TestWeight:
 
         resp = await client.get("/api/v1/health/weight")
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        assert sorted(w["weight_lbs"] for w in resp.json()) == [184.0, 185.0]
 
 
 class TestCholesterol:
@@ -150,6 +151,10 @@ class TestCholesterol:
             json={"total_mg_dl": 195},
         )
         assert resp.status_code == 201
+        data = resp.json()
+        assert data["total_mg_dl"] == 195
+        assert data["ldl"] is None
+        assert data["hdl"] is None
 
     @pytest.mark.asyncio
     async def test_list_cholesterol(self, client: AsyncClient):
@@ -208,4 +213,3 @@ class TestDashboard:
         assert data["latest_weight"]["weight_lbs"] == 185.0
         assert data["latest_cholesterol"]["total_mg_dl"] == 200
         assert data["bp_status"] == "elevated"
-

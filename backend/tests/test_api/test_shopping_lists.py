@@ -4,6 +4,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.pantry import PantryItem
 from app.models.shopping import ShoppingList, ShoppingListItem
 from app.models.user import User
 
@@ -117,3 +118,39 @@ class TestReplenish:
     async def test_replenish_not_found(self, client: AsyncClient):
         resp = await client.post(f"/api/v1/shopping-lists/{uuid4()}/replenish")
         assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_replenish_adds_low_stock_items(
+        self,
+        client: AsyncClient,
+        db_session: AsyncSession,
+        test_user: User,
+        shopping_list: ShoppingList,
+    ):
+        db_session.add_all(
+            [
+                PantryItem(
+                    user_id=test_user.id,
+                    name="Spinach",
+                    category="produce",
+                    quantity=0.5,
+                    unit="bag",
+                    low_stock_threshold=1.0,
+                ),
+                PantryItem(
+                    user_id=test_user.id, name="Rice", quantity=5.0, low_stock_threshold=1.0
+                ),
+                PantryItem(user_id=test_user.id, name="Salt", quantity=0.0),  # no threshold
+            ]
+        )
+        await db_session.flush()
+
+        resp = await client.post(f"/api/v1/shopping-lists/{shopping_list.id}/replenish")
+
+        assert resp.status_code == 200
+        items = {i["name"]: i for i in resp.json()["items"]}
+        assert set(items) == {"Milk", "Eggs", "Spinach"}
+        spinach = items["Spinach"]
+        assert spinach["unit"] == "bag"
+        assert spinach["is_ai_suggested"] is True
+        assert spinach["health_priority_score"] == 1.0

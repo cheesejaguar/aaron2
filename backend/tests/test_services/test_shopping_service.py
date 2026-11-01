@@ -40,10 +40,8 @@ class TestBuildAmazonCartUrl:
             ]
         )
         url = build_amazon_cart_url(sl)
-        assert "amazon.com" in url
-        assert "amazonfresh" in url
-        assert "Milk" in url
-        assert "Bread" in url
+        # Checked items (Eggs) are excluded; names are joined and URL-encoded
+        assert url == "https://www.amazon.com/s?k=Milk%2C+Bread&i=amazonfresh"
 
     def test_max_10_items(self):
         items = [{"name": f"Item{i}"} for i in range(15)]

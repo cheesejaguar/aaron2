@@ -106,11 +106,13 @@ async def chat(db: AsyncSession, user: User, data: ChatRequest) -> ChatResponse:
         db, str(user.id), TaskType.COACH_CHAT, messages, use_cache=False
     )
 
-    # Save conversation
-    if not conversation.messages_json:
-        conversation.messages_json = []
-    conversation.messages_json.append({"role": "user", "content": data.message})
-    conversation.messages_json.append({"role": "assistant", "content": reply})
+    # Save conversation. Assign a new list: in-place appends to a plain JSONB column
+    # are not change-tracked, so later turns would silently not be persisted.
+    conversation.messages_json = [
+        *(conversation.messages_json or []),
+        {"role": "user", "content": data.message},
+        {"role": "assistant", "content": reply},
+    ]
     await db.flush()
 
     return ChatResponse(reply=reply, conversation_id=str(conversation.id))
